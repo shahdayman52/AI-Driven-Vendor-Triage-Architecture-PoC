@@ -1,0 +1,125 @@
+# VIAT PoC - n8n in Queue Mode with PostgreSQL + Redis, optional ngrok tunnel.
+#
+# Start core stack:        docker compose up -d
+# Start with ngrok tunnel: NGROK_AUTHTOKEN=... NGROK_DOMAIN=your-name.ngrok-free.app \
+#                          WEBHOOK_URL=https://your-name.ngrok-free.app/ \
+#                          docker compose --profile tunnel up -d
+# Scale workers for seasonal spikes: docker compose up -d --scale n8n-worker=4
+
+x-n8n-env: &n8n-env
+  DB_TYPE: postgresdb
+  DB_POSTGRESDB_HOST: postgres
+  DB_POSTGRESDB_PORT: 5432
+  DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:-n8n}
+  DB_POSTGRESDB_USER: ${POSTGRES_USER:-n8n}
+  DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+  EXECUTIONS_MODE: queue
+  QUEUE_BULL_REDIS_HOST: redis
+  QUEUE_BULL_REDIS_PORT: 6379
+  QUEUE_HEALTH_CHECK_ACTIVE: "true"
+  N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-change-me-to-a-long-random-string}
+  WEBHOOK_URL: ${WEBHOOK_URL:-http://localhost:5678/}
+  GENERIC_TIMEZONE: America/Chicago
+  EXECUTIONS_DATA_SAVE_ON_ERROR: all
+  EXECUTIONS_DATA_PRUNE: "true"
+  EXECUTIONS_DATA_MAX_AGE: 336
+
+x-n8n-base: &n8n-base
+  image: docker.n8n.io/n8nio/n8n:1.90.2
+  restart: unless-stopped
+  environment: *n8n-env
+  volumes:
+    - n8n_data:/home/node/.n8n
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-n8n}
+      POSTGRES_USER: ${POSTGRES_USER:-n8n}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-n8n} -d ${POSTGRES_DB:-n8n}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1g
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Main instance: editor UI, webhook intake (incl. HITL Wait resume URLs), enqueues jobs to Redis.
+  n8n:
+    <<: *n8n-base
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    # reservations = guaranteed minimum (2 vCPU / 4GB); limits = hard cap.
+    deploy:
+      resources:
+        reservations:
+          cpus: "2"
+          memory: 4g
+        limits:
+          cpus: "2"
+          memory: 4g
+
+  # Worker(s): pull executions from the Redis queue. Scale horizontally for peak seasons.
+  n8n-worker:
+    <<: *n8n-base
+    command: worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      n8n:
+        condition: service_started
+    deploy:
+      resources:
+        reservations:
+          cpus: "2"
+          memory: 4g
+        limits:
+          cpus: "2"
+          memory: 4g
+
+  # Tunnel: exposes the local webhook (http://n8n:5678) for testing with the sample vendor CSV.
+  ngrok:
+    image: ngrok/ngrok:3-alpine
+    profiles: ["tunnel"]
+    # Fails fast with a clear message if NGROK_DOMAIN is not set (it must match WEBHOOK_URL).
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - 'if [ -z "$$NGROK_DOMAIN" ]; then echo "NGROK_DOMAIN is required for the tunnel profile" >&2; exit 1; fi; exec ngrok http n8n:5678 --url="$$NGROK_DOMAIN"'
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
+      NGROK_DOMAIN: ${NGROK_DOMAIN:-}
+    ports:
+      - "4040:4040"
+    depends_on:
+      - n8n
+
+volumes:
+  n8n_data:
+  postgres_data:
+  redis_data:

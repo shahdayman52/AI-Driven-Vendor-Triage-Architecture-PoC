@@ -1,0 +1,83 @@
+{
+  "id": "viatDlqErrorWf01",
+  "name": "VIAT - Dead Letter Queue (Error Handler)",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "4bd9c572-49ed-587b-bfd8-8f14384609bb",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Capture the failure context from the Error Trigger.\nconst e = $input.first().json;\nreturn [{ json: {\n  workflow_id: e.workflow?.id ?? null,\n  workflow_name: e.workflow?.name ?? null,\n  execution_id: e.execution?.id ?? null,\n  execution_url: e.execution?.url ?? null,\n  failed_node: e.execution?.lastNodeExecuted ?? e.trigger?.error?.node?.name ?? null,\n  error_message: e.execution?.error?.message ?? e.trigger?.error?.message ?? 'Unknown error',\n  execution_mode: e.execution?.mode ?? null,\n} }];"
+      },
+      "id": "f2ac663b-d6a5-5e6a-9fa6-4112c70bf04b",
+      "name": "Extract Failure Details",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT pg_advisory_xact_lock(424242);\nCREATE TABLE IF NOT EXISTS viat_dead_letter_queue (\n  id SERIAL PRIMARY KEY,\n  logged_at TIMESTAMPTZ NOT NULL DEFAULT now(),\n  workflow_id TEXT,\n  workflow_name TEXT,\n  execution_id TEXT,\n  execution_url TEXT,\n  failed_node TEXT,\n  error_message TEXT,\n  execution_mode TEXT,\n  raw_execution_data TEXT,\n  status TEXT NOT NULL DEFAULT 'pending_review'\n);\nINSERT INTO viat_dead_letter_queue\n  (workflow_id, workflow_name, execution_id, execution_url, failed_node, error_message, execution_mode, raw_execution_data)\nVALUES ($1, $2, $3, $4, $5, $6, $7,\n  (SELECT d.data FROM execution_data d WHERE d.\"executionId\"::text = $3::text LIMIT 1))\nRETURNING id, execution_id, failed_node, status;",
+        "options": {
+          "queryReplacement": "={{ [$json.workflow_id, $json.workflow_name, $json.execution_id, $json.execution_url, $json.failed_node, $json.error_message, $json.execution_mode] }}"
+        }
+      },
+      "id": "82352ee7-0e3d-57a4-8803-9a7aaa561e2a",
+      "name": "Log to Dead Letter Queue (Postgres)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        440,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "viatPostgresCred",
+          "name": "VIAT Postgres"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Extract Failure Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Failure Details": {
+      "main": [
+        [
+          {
+            "node": "Log to Dead Letter Queue (Postgres)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "tags": []
+}

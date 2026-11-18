@@ -1,0 +1,392 @@
+{
+  "id": "viatTriageMain01",
+  "name": "VIAT - Vendor Ticket Triage (Primary)",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "vendor-ticket",
+        "authentication": "headerAuth",
+        "options": {}
+      },
+      "id": "e1769617-eb46-5672-b27e-d0edf2fc4e4f",
+      "name": "Vendor Ticket Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "5f1c2a7e-9b3d-4c8e-a1f0-3c6d8e9f0a11",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "viatWebhookAuth1",
+          "name": "VIAT Webhook Header Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Replaces legacy glue code: validate + normalize one vendor ticket (CSV row posted as JSON).\nconst b = $input.first().json.body || {};\nconst required = ['Ticket_ID', 'Vendor_Name', 'Subject', 'Message_Body'];\nconst missing = required.filter(k => !b[k] || String(b[k]).trim() === '');\nif (missing.length) {\n  // Fail loudly so the DLQ error workflow catches it (no silent failures).\n  throw new Error('Malformed vendor ticket payload - missing fields ' + missing.join(', '));\n}\nreturn [{ json: {\n  ticket_id: String(b.Ticket_ID).trim(),\n  ticket_date: b.Date || null,\n  vendor_name: String(b.Vendor_Name).trim(),\n  vendor_email: b.Vendor_Email || 'vendor-notifications@example.com',\n  subject: String(b.Subject).trim(),\n  message_body: String(b.Message_Body).trim(),\n  priority_level: b.Priority_Level || 'Unspecified',\n} }];"
+      },
+      "id": "3215fa93-6b2e-5c26-9487-747e36cc75cd",
+      "name": "Normalize Ticket",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Triage the vendor ticket below.\n\nTicket ID: {{ $json.ticket_id }}\nVendor: {{ $json.vendor_name }}\nSubject: {{ $json.subject }}\nVendor priority: {{ $json.priority_level }}\nMessage: {{ $json.message_body }}\n\nUse self-asking. Ask yourself each follow-up question below, answer it from the ticket only, then decide.\nQ1: What is the core issue being reported (for example billing or payment discrepancy, damaged or short freight, detention or accessorial charge, scheduling or operational problem, document request, general inquiry)?\nQ2: Which load numbers, invoice numbers, BOL IDs, check numbers or other reference IDs appear in the message?\nQ3: Is the vendor formally disputing a charge, deduction, claim or payment?\nQ4: Does ANY of these apply: (a) the vendor priority above is 'High'; (b) the vendor explicitly calls the issue high-value, or asks for it to be escalated or reviewed by an executive or VP; (c) the stated financial impact is above 5,000 USD; (d) the message threatens legal action or ending the business relationship? Answer only yes or no and name the letters that apply, without repeating any amount.\nQ5: Decision: if Q3 is yes AND Q4 is yes, the classification is 'High-Value Dispute'. Otherwise choose the best fit from 'Standard Dispute', 'Billing Inquiry', 'Operational Issue', 'Documentation Request', 'General Inquiry'.\n\nReturn ONLY a JSON object with exactly these keys:\n\"ticket_id\": string, the ticket ID above;\n\"self_ask\": array of 5 objects, each with \"question\" and \"answer\" strings, for Q1 to Q5;\n\"classification\": one of 'High-Value Dispute', 'Standard Dispute', 'Billing Inquiry', 'Operational Issue', 'Documentation Request', 'General Inquiry';\n\"severity_level\": one of 'low', 'medium', 'high', 'critical';\n\"extracted_ids\": array of strings;\n\"draft_response\": a short, polite reply to the vendor that acknowledges the issue and states it has been routed to the correct team.\nThe negative prompting rules from the system message apply to every key, including self_ask answers and draft_response: no US dollar amounts and no contract timelines.",
+        "messages": {
+          "messageValues": [
+            {
+              "message": "You are the VIAT (Vendor Intelligence & Automated Triage) classifier for ApexLogistics US. You read one vendor freight ticket and return a triage decision as a single JSON object. OUTPUT FORMAT: Respond with ONLY one valid JSON object. Do not wrap it in markdown code fences and do not add any text before or after it. NEGATIVE PROMPTING - YOU MUST NOT: (1) mention, repeat, estimate, calculate or invent any US dollar amount, price, rate, tariff, fee, penalty, payout or other monetary figure in any output field; (2) mention, promise or invent any contract timeline, SLA term, payment term, due date, deadline or turnaround time in any output field; (3) state or imply ApexLogistics pricing, SLA commitments or contractual obligations; (4) invent facts, IDs or names that are not present in the ticket. When the ticket concerns money or contract terms, refer to it only in neutral words such as 'the disputed charge' or 'the payment terms', and say that the responsible ApexLogistics team will review it."
+            }
+          ]
+        }
+      },
+      "id": "be255257-6d3a-59ec-9bd1-de748ba6180d",
+      "name": "VIAT Triage Executor (LLM)",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.6,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-2.0-flash",
+        "options": {
+          "temperature": 0
+        }
+      },
+      "id": "9a8dbfaf-31a1-5a09-b267-2bab7c4fe0d6",
+      "name": "Google Gemini Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        440,
+        520
+      ],
+      "credentials": {
+        "googlePalmApi": {
+          "id": "viatGeminiCred01",
+          "name": "Google Gemini (PaLM) API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse the LLM's structured JSON output and validate it against the prompt schema.\nconst ALLOWED = ['High-Value Dispute', 'Standard Dispute', 'Billing Inquiry', 'Operational Issue', 'Documentation Request', 'General Inquiry'];\nconst raw = String($input.first().json.text || '').replace(/```(json)?/gi, '').trim();\nlet out;\ntry { out = JSON.parse(raw); } catch (e) { throw new Error('LLM returned non-JSON output - ' + raw.slice(0, 200)); }\nif (!ALLOWED.includes(out.classification)) throw new Error('LLM returned unknown classification - ' + out.classification);\nconst ticket = $('Normalize Ticket').first().json;\nreturn [{ json: { ...ticket, ...out, ticket_id: ticket.ticket_id } }];"
+      },
+      "id": "581f9bd2-a73e-5158-9f57-93a318cbcf0a",
+      "name": "Parse Classification JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Deterministic brand-safety guardrail: runs before ANY vendor-facing email (auto or HITL-approved).\n// Blocks draft replies that mention US dollar amounts or contract timelines, even if the LLM ignored the negative prompt.\nconst t = $input.first().json;\nconst draft = String(t.draft_response || '').trim();\nif (!draft) throw new Error('Guardrail blocked ticket ' + t.ticket_id + ' - empty draft_response');\nconst RULES = [\n  ['dollar amount', /\\$\\s*\\d|\\bUSD\\b|\\bdollars?\\b|\\b\\d[\\d,]*(\\.\\d+)?\\s*(k|K)\\b/],\n  ['monetary figure', /\\b\\d[\\d,]*\\.\\d{2}\\b|\\b\\d{1,3}(,\\d{3})+\\b/],\n  ['contract timeline', /\\bnet[\\s-]?\\d+\\b|\\b\\d+\\s*(business\\s+|calendar\\s+)?(hours?|days?|weeks?|months?)\\b|\\bwithin\\s+\\d+/i],\n  ['SLA / deadline term', /\\bSLA\\b|\\bdeadline\\b|\\bdue date\\b|\\bturnaround\\b|\\bguarantee/i],\n];\nconst hits = RULES.filter(([, re]) => re.test(draft)).map(([name]) => name);\nif (hits.length) {\n  // Fail loudly: the ticket is isolated in the DLQ and no vendor email is sent.\n  throw new Error('Guardrail blocked ticket ' + t.ticket_id + ' - draft_response contains ' + hits.join(', '));\n}\nreturn [{ json: t }];"
+      },
+      "id": "c7e3a1d2-5b4f-4e8a-9c6d-1f2a3b4c5d6e",
+      "name": "Brand Safety Guardrail",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "hvd-check",
+              "leftValue": "={{ $json.classification }}",
+              "rightValue": "High-Value Dispute",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "51c6b99a-93c2-5db9-9eb4-7a1c1e56bc95",
+      "name": "Is High-Value Dispute?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "viat-bot@example.com",
+        "toEmail": "vendor-executive-oversight@example.com",
+        "subject": "=[HITL REQUIRED] High-Value Dispute {{ $json.ticket_id }} - {{ $json.vendor_name }}",
+        "emailFormat": "text",
+        "text": "=A vendor ticket was classified as a High-Value Dispute and is paused for executive review.\n\nTicket: {{ $json.ticket_id }}\nVendor: {{ $json.vendor_name }}\nSubject: {{ $json.subject }}\nSeverity: {{ $json.severity_level }}\nReferences: {{ $json.extracted_ids.join(', ') }}\n\nVendor message:\n{{ $json.message_body }}\n\nProposed reply:\n{{ $json.draft_response }}\n\nApprove: {{ $execution.resumeUrl }}?decision=approve\nReject: {{ $execution.resumeUrl }}?decision=reject",
+        "options": {}
+      },
+      "id": "a60caad8-5e39-5197-b22e-174e855d1885",
+      "name": "HITL Executive Alert (Mock Notification)",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1460,
+        180
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "viatSmtpCred0001",
+          "name": "VIAT SMTP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resume": "webhook",
+        "options": {}
+      },
+      "id": "3246cc9e-549b-5bb9-bcb5-0ea456efb319",
+      "name": "HITL Wait - Executive Approval",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1680,
+        180
+      ],
+      "webhookId": "7a2d4e61-3c8b-4f5a-9e10-2b4c6d8e0f22"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "approve-check",
+              "leftValue": "={{ $json.query.decision }}",
+              "rightValue": "approve",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "99512f83-5381-5ea6-91a0-3f9e6fd27dda",
+      "name": "Executive Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1900,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "vendor-support@example.com",
+        "toEmail": "={{ $('Parse Classification JSON').item.json.vendor_email }}",
+        "subject": "=Re: {{ $('Parse Classification JSON').item.json.subject }} [{{ $('Parse Classification JSON').item.json.ticket_id }}]",
+        "emailFormat": "text",
+        "text": "={{ $('Parse Classification JSON').item.json.draft_response }}",
+        "options": {}
+      },
+      "id": "5dc69634-42da-56c7-b348-7b92b182fc07",
+      "name": "Send Approved Vendor Response",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        2120,
+        100
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "viatSmtpCred0001",
+          "name": "VIAT SMTP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "vendor-support@example.com",
+        "toEmail": "={{ $json.vendor_email }}",
+        "subject": "=Re: {{ $json.subject }} [{{ $json.ticket_id }}]",
+        "emailFormat": "text",
+        "text": "={{ $json.draft_response }}",
+        "options": {}
+      },
+      "id": "d4720995-4a37-5fbf-9283-9cbc53191abe",
+      "name": "Send Automated Vendor Response",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1460,
+        420
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "viatSmtpCred0001",
+          "name": "VIAT SMTP"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Vendor Ticket Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Ticket": {
+      "main": [
+        [
+          {
+            "node": "VIAT Triage Executor (LLM)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "VIAT Triage Executor (LLM)",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VIAT Triage Executor (LLM)": {
+      "main": [
+        [
+          {
+            "node": "Parse Classification JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Classification JSON": {
+      "main": [
+        [
+          {
+            "node": "Brand Safety Guardrail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Brand Safety Guardrail": {
+      "main": [
+        [
+          {
+            "node": "Is High-Value Dispute?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is High-Value Dispute?": {
+      "main": [
+        [
+          {
+            "node": "HITL Executive Alert (Mock Notification)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Automated Vendor Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HITL Executive Alert (Mock Notification)": {
+      "main": [
+        [
+          {
+            "node": "HITL Wait - Executive Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HITL Wait - Executive Approval": {
+      "main": [
+        [
+          {
+            "node": "Executive Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Executive Approved?": {
+      "main": [
+        [
+          {
+            "node": "Send Approved Vendor Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "viatDlqErrorWf01",
+    "saveDataErrorExecution": "all"
+  },
+  "pinData": {},
+  "tags": []
+}
